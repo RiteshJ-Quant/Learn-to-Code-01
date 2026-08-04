@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 # Page Configuration
 st.set_page_config(
-    page_title="Stock Data Fetcher & Batch Downloader",
+    page_title="Stock OHCL Data App",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -34,7 +34,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-header">📈 Stock OHLC Data Fetcher & Batch Zip Generator</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header">📈 Stock OHLC Data </div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header">Fetch historical OHLC stock data individually or in batch from Yahoo Finance. Export results as single CSVs or zipped archives.</div>', unsafe_allow_html=True)
 
 # Sidebar - Mode & Search Parameters
