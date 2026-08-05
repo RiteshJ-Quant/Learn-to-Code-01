@@ -41,9 +41,10 @@ st.markdown('<div class="sub-header">Fetch historical OHLC stock data individual
 st.sidebar.header("⚙️ Data Fetching Mode")
 app_mode = st.sidebar.radio(
     "Choose Mode",
-    options=["Single Stock Mode", "Batch CSV Upload Mode"],
+    options=["Single Stock Mode", "Batch CSV Upload Mode", "Stock Screener Mode"],
     index=0
 )
+
 
 st.sidebar.markdown("---")
 st.sidebar.header("📅 Date & Timeframe Settings")
@@ -211,7 +212,7 @@ if app_mode == "Single Stock Mode":
 # ==============================================================================
 # MODE 2: BATCH CSV UPLOAD MODE
 # ==============================================================================
-else:
+elif app_mode == "Batch CSV Upload Mode":
     st.subheader("📁 Batch Download Stock Data from CSV File")
     st.write("Upload a CSV file containing a list of stock symbols (e.g., `ind_niftytotalmarket_list.csv`). The app will fetch OHLC data for all symbols and package them into a downloadable **ZIP archive**.")
 
@@ -362,3 +363,276 @@ else:
 
         except Exception as e:
             st.error(f"Error reading CSV file: {e}")
+
+# ==============================================================================
+# MODE 3: STOCK SCREENER MODE
+# ==============================================================================
+else:
+    st.subheader("🔍 Stock Screener - Moving Average Filter")
+    st.write(
+        "Upload a CSV file containing a list of stock symbols. Set your Moving Average parameters (SMA/EMA & period). "
+        "The app will fetch price history and output all stocks whose latest close price is **above** their Moving Average."
+    )
+
+    uploaded_file = st.file_uploader(
+        "Upload CSV File with 'symbol' column for Screening",
+        type=["csv"],
+        help="CSV must contain a column named 'Symbol' or similar",
+        key="screener_csv"
+    )
+
+    if uploaded_file is not None:
+        try:
+            input_df = pd.read_csv(uploaded_file)
+            st.success(f"Successfully loaded CSV file with **{len(input_df)} rows** and columns: `{list(input_df.columns)}`")
+
+            # Identify Symbol column (case-insensitive search)
+            symbol_col = None
+            for col in input_df.columns:
+                if col.strip().lower() in ['symbol', 'ticker', 'code', 'symbol name', 'stock']:
+                    symbol_col = col
+                    break
+
+            if symbol_col is None:
+                symbol_col = st.selectbox(
+                    "Could not auto-detect 'symbol' column. Please select the symbol column manually:",
+                    options=list(input_df.columns),
+                    key="screener_sym_col"
+                )
+
+            # Extract symbols
+            raw_symbols = input_df[symbol_col].dropna().unique().tolist()
+            formatted_symbols = [format_symbol(sym, append_ns) for sym in raw_symbols]
+
+            st.write(f"Found **{len(formatted_symbols)} unique symbols** to screen.")
+
+            # Screener Configuration Controls
+            st.markdown("---")
+            st.subheader("⚙️ Screener Moving Average Settings")
+
+            col_ma1, col_ma2, col_ma3 = st.columns(3)
+            with col_ma1:
+                ma_type = st.selectbox(
+                    "Moving Average Type",
+                    options=["SMA (Simple Moving Average)", "EMA (Exponential Moving Average)"],
+                    index=0,
+                    help="Select Simple or Exponential Moving Average"
+                )
+            with col_ma2:
+                ma_period = st.number_input(
+                    "MA Period (Bars/Days)",
+                    min_value=2,
+                    max_value=500,
+                    value=50,
+                    step=1,
+                    help="Number of data points used to compute moving average (e.g., 20, 50, 200)"
+                )
+            with col_ma3:
+                max_symbols = st.number_input(
+                    "Max Symbols to Screen",
+                    min_value=1,
+                    max_value=len(formatted_symbols),
+                    value=min(50, len(formatted_symbols)),
+                    step=10,
+                    help="Limit max symbols to avoid long wait times",
+                    key="screener_max_sym"
+                )
+
+            st.markdown("---")
+            run_screener_btn = st.button("🚀 Run Moving Average Screener", type="primary", width="stretch")
+
+            symbols_to_process = formatted_symbols[:max_symbols]
+            ma_type_code = "SMA" if "SMA" in ma_type else "EMA"
+
+            if run_screener_btn:
+                st.subheader(f"⏳ Screening {len(symbols_to_process)} stocks for Close > {ma_period} {ma_type_code}...")
+
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                passed_stocks = []
+                failed_stocks = []
+                error_stocks = []
+
+                total = len(symbols_to_process)
+
+                for idx, sym in enumerate(symbols_to_process):
+                    status_text.text(f"[{idx+1}/{total}] Processing symbol: {sym}...")
+                    progress_bar.progress((idx + 1) / total)
+
+                    try:
+                        ticker_obj = yf.Ticker(sym)
+                        df = ticker_obj.history(
+                            start=start_date,
+                            end=end_date + timedelta(days=1),
+                            interval=selected_interval,
+                            auto_adjust=False
+                        )
+
+                        if df.empty or len(df) < ma_period:
+                            error_stocks.append({"Symbol": sym, "Reason": f"Insufficient data (less than {ma_period} bars)" if not df.empty else "No data returned"})
+                            continue
+
+                        df = df.reset_index()
+
+                        if 'Date' in df.columns:
+                            df['Date'] = pd.to_datetime(df['Date']).dt.date
+                        elif 'Datetime' in df.columns:
+                            df['Date'] = pd.to_datetime(df['Datetime']).dt.date
+                            df.drop(columns=['Datetime'], inplace=True, errors='ignore')
+
+                        # Calculate Moving Average
+                        if ma_type_code == "SMA":
+                            df['MA'] = df['Close'].rolling(window=int(ma_period)).mean()
+                        else:
+                            df['MA'] = df['Close'].ewm(span=int(ma_period), adjust=False).mean()
+
+                        valid_df = df.dropna(subset=['Close', 'MA'])
+                        if valid_df.empty:
+                            error_stocks.append({"Symbol": sym, "Reason": "Unable to compute Moving Average"})
+                            continue
+
+                        latest_row = valid_df.iloc[-1]
+                        latest_close = float(latest_row['Close'])
+                        latest_ma = float(latest_row['MA'])
+                        latest_date = latest_row['Date']
+
+                        diff = latest_close - latest_ma
+                        pct_above = (diff / latest_ma) * 100 if latest_ma != 0 else 0.0
+
+                        record = {
+                            "Symbol": sym,
+                            "Latest Date": latest_date,
+                            "Latest Close": round(latest_close, 2),
+                            f"MA ({ma_type_code} {ma_period})": round(latest_ma, 2),
+                            "Diff Above MA": round(diff, 2),
+                            "% Above MA": round(pct_above, 2)
+                        }
+
+                        if latest_close > latest_ma:
+                            passed_stocks.append(record)
+                        else:
+                            failed_stocks.append(record)
+
+                    except Exception as e:
+                        error_stocks.append({"Symbol": sym, "Reason": str(e)})
+
+                progress_bar.progress(1.0)
+                status_text.success("🎉 Screening Complete!")
+
+                # Store screener results in session state for interactive persistent view
+                st.session_state['screener_results'] = {
+                    'passed': passed_stocks,
+                    'failed': failed_stocks,
+                    'errors': error_stocks,
+                    'ma_type': ma_type_code,
+                    'ma_period': ma_period
+                }
+
+            # Display Screened Results if available in session state
+            if 'screener_results' in st.session_state:
+                res = st.session_state['screener_results']
+                passed = res['passed']
+                failed = res['failed']
+                errors = res['errors']
+                p_ma_type = res['ma_type']
+                p_ma_period = res['ma_period']
+
+                st.markdown("---")
+                st.subheader(f"📊 Screener Output Summary (Close > {p_ma_period} {p_ma_type})")
+
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Total Screened", f"{len(passed) + len(failed) + len(errors)}")
+                m2.metric("Stocks Above MA (Passed)", f"{len(passed)}", delta=f"{len(passed)} stocks", delta_color="normal")
+                m3.metric("Stocks Below MA (Failed)", f"{len(failed)}")
+                m4.metric("Errors / Missing Data", f"{len(errors)}")
+
+                if passed:
+                    st.success(f"✅ Found **{len(passed)} stocks** trading **ABOVE** the {p_ma_period} {p_ma_type}!")
+                    
+                    passed_df = pd.DataFrame(passed)
+                    # Sort by % Above MA descending
+                    passed_df = passed_df.sort_values(by="% Above MA", ascending=False)
+
+                    st.write(f"### 📋 Stocks Above Moving Average ({len(passed_df)} stocks)")
+                    st.dataframe(passed_df, width="stretch")
+
+                    col_dl, _ = st.columns([1, 1])
+                    with col_dl:
+                        csv_data = passed_df.to_csv(index=False)
+                        st.download_button(
+                            label=f"💾 Download Screened Stocks CSV ({len(passed)} stocks)",
+                            data=csv_data,
+                            file_name=f"screener_above_{p_ma_type}{p_ma_period}_{datetime.today().strftime('%Y%m%d')}.csv",
+                            mime="text/csv",
+                            type="primary",
+                            width="stretch"
+                        )
+
+                    # Interactive Chart Visualizer for Screened Stocks
+                    st.markdown("---")
+                    st.subheader("📉 Visualizer for Screened Stocks")
+                    selected_chart_sym = st.selectbox(
+                        "Select a passed stock to view price chart & Moving Average line:",
+                        options=passed_df["Symbol"].tolist()
+                    )
+
+                    if selected_chart_sym:
+                        with st.spinner(f"Loading chart for {selected_chart_sym}..."):
+                            try:
+                                t_obj = yf.Ticker(selected_chart_sym)
+                                chart_data = t_obj.history(
+                                    start=start_date,
+                                    end=end_date + timedelta(days=1),
+                                    interval=selected_interval,
+                                    auto_adjust=False
+                                ).reset_index()
+
+                                if 'Date' in chart_data.columns:
+                                    chart_data['Date'] = pd.to_datetime(chart_data['Date']).dt.date
+                                elif 'Datetime' in chart_data.columns:
+                                    chart_data['Date'] = pd.to_datetime(chart_data['Datetime']).dt.date
+
+                                if p_ma_type == "SMA":
+                                    chart_data['MA'] = chart_data['Close'].rolling(window=int(p_ma_period)).mean()
+                                else:
+                                    chart_data['MA'] = chart_data['Close'].ewm(span=int(p_ma_period), adjust=False).mean()
+
+                                go = importlib.import_module("plotly.graph_objects")
+                                fig = go.Figure()
+                                fig.add_trace(go.Candlestick(
+                                    x=chart_data['Date'],
+                                    open=chart_data['Open'],
+                                    high=chart_data['High'],
+                                    low=chart_data['Low'],
+                                    close=chart_data['Close'],
+                                    name="OHLC"
+                                ))
+                                fig.add_trace(go.Scatter(
+                                    x=chart_data['Date'],
+                                    y=chart_data['MA'],
+                                    mode='lines',
+                                    name=f"{p_ma_type} {p_ma_period}",
+                                    line=dict(color='orange', width=2)
+                                ))
+                                fig.update_layout(
+                                    title=f"{selected_chart_sym} - Close vs {p_ma_type} {p_ma_period}",
+                                    xaxis_title="Date",
+                                    yaxis_title="Price",
+                                    template="plotly_white",
+                                    xaxis_rangeslider_visible=False,
+                                    height=500
+                                )
+                                st.plotly_chart(fig, width="stretch")
+                            except Exception as chart_err:
+                                st.error(f"Error plotting chart for {selected_chart_sym}: {chart_err}")
+                else:
+                    st.warning(f"No stocks found trading above the {p_ma_period} {p_ma_type}.")
+
+                if errors:
+                    with st.expander("See Skipped / Error Symbols"):
+                        st.dataframe(pd.DataFrame(errors))
+
+        except Exception as e:
+            st.error(f"Error reading CSV file: {e}")
+
