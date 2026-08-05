@@ -81,6 +81,25 @@ append_ns = st.sidebar.toggle(
     help="Appends .NS to stock symbols for National Stock Exchange (NSE) India stocks (e.g. RELIANCE -> RELIANCE.NS)"
 )
 
+# Screener MA Settings in Sidebar (when Stock Screener Mode is active)
+if app_mode == "Stock Screener Mode":
+    st.sidebar.markdown("---")
+    st.sidebar.header("⚙️ Moving Average Settings")
+    ma_type = st.sidebar.selectbox(
+        "Moving Average Type",
+        options=["SMA (Simple Moving Average)", "EMA (Exponential Moving Average)"],
+        index=0,
+        help="Select Simple or Exponential Moving Average"
+    )
+    ma_period = st.sidebar.number_input(
+        "MA Period (Bars/Days)",
+        min_value=2,
+        max_value=500,
+        value=50,
+        step=1,
+        help="Number of data points used to compute moving average (e.g., 20, 50, 200)"
+    )
+
 def format_symbol(sym: str, add_ns: bool) -> str:
     """Format symbol by trimming whitespaces and appending .NS if requested."""
     sym = str(sym).strip().upper()
@@ -92,6 +111,7 @@ def format_symbol(sym: str, add_ns: bool) -> str:
 if start_date >= end_date:
     st.error("Error: Start date must be earlier than End date.")
     st.stop()
+
 
 # ==============================================================================
 # MODE 1: SINGLE STOCK MODE
@@ -406,43 +426,27 @@ else:
 
             st.write(f"Found **{len(formatted_symbols)} unique symbols** to screen.")
 
-            # Screener Configuration Controls
+            # Batch Limit & Action Button
             st.markdown("---")
-            st.subheader("⚙️ Screener Moving Average Settings")
-
-            col_ma1, col_ma2, col_ma3 = st.columns(3)
-            with col_ma1:
-                ma_type = st.selectbox(
-                    "Moving Average Type",
-                    options=["SMA (Simple Moving Average)", "EMA (Exponential Moving Average)"],
-                    index=0,
-                    help="Select Simple or Exponential Moving Average"
-                )
-            with col_ma2:
-                ma_period = st.number_input(
-                    "MA Period (Bars/Days)",
-                    min_value=2,
-                    max_value=500,
-                    value=50,
-                    step=1,
-                    help="Number of data points used to compute moving average (e.g., 20, 50, 200)"
-                )
-            with col_ma3:
+            col_scr1, col_scr2 = st.columns([1, 2])
+            with col_scr1:
                 max_symbols = st.number_input(
-                    "Max Symbols to Screen",
+                    "Maximum Symbols to Screen",
                     min_value=1,
                     max_value=len(formatted_symbols),
                     value=min(50, len(formatted_symbols)),
                     step=10,
-                    help="Limit max symbols to avoid long wait times",
+                    help="Limit maximum symbols to avoid long processing times",
                     key="screener_max_sym"
                 )
-
-            st.markdown("---")
-            run_screener_btn = st.button("🚀 Run Moving Average Screener", type="primary", width="stretch")
+            with col_scr2:
+                st.write("")
+                st.write("")
+                run_screener_btn = st.button("🚀 Run Moving Average Screener", type="primary", width="stretch")
 
             symbols_to_process = formatted_symbols[:max_symbols]
             ma_type_code = "SMA" if "SMA" in ma_type else "EMA"
+
 
             if run_screener_btn:
                 st.subheader(f"⏳ Screening {len(symbols_to_process)} stocks for Close > {ma_period} {ma_type_code}...")
