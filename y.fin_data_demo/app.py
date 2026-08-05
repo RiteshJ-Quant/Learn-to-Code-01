@@ -99,6 +99,10 @@ if app_mode == "Stock Screener Mode":
         step=1,
         help="Number of data points used to compute moving average (e.g., 20, 50, 200)"
     )
+    if st.sidebar.button("🧹 Clear Stock Data Cache", help="Clear cached stock price data to force re-downloading fresh data"):
+        st.cache_data.clear()
+        st.sidebar.success("Cache cleared!")
+
 
 def format_symbol(sym: str, add_ns: bool) -> str:
     """Format symbol by trimming whitespaces and appending .NS if requested."""
@@ -107,7 +111,28 @@ def format_symbol(sym: str, add_ns: bool) -> str:
         sym = f"{sym}.NS"
     return sym
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_cached_stock_data(symbol: str, start: datetime, end: datetime, interval: str) -> pd.DataFrame:
+    """Fetch and cache stock OHLC history from Yahoo Finance."""
+    ticker_obj = yf.Ticker(symbol)
+    df = ticker_obj.history(
+        start=start,
+        end=end + timedelta(days=1),
+        interval=interval,
+        auto_adjust=False
+    )
+    if df.empty:
+        return pd.DataFrame()
+    df = df.reset_index()
+    if 'Date' in df.columns:
+        df['Date'] = pd.to_datetime(df['Date']).dt.date
+    elif 'Datetime' in df.columns:
+        df['Date'] = pd.to_datetime(df['Datetime']).dt.date
+        df.drop(columns=['Datetime'], inplace=True, errors='ignore')
+    return df
+
 # Validation helper for dates
+
 if start_date >= end_date:
     st.error("Error: Start date must be earlier than End date.")
     st.stop()
@@ -465,31 +490,20 @@ else:
                     progress_bar.progress((idx + 1) / total)
 
                     try:
-                        ticker_obj = yf.Ticker(sym)
-                        df = ticker_obj.history(
-                            start=start_date,
-                            end=end_date + timedelta(days=1),
-                            interval=selected_interval,
-                            auto_adjust=False
-                        )
+                        df = get_cached_stock_data(sym, start_date, end_date, selected_interval)
 
                         if df.empty or len(df) < ma_period:
                             error_stocks.append({"Symbol": sym, "Reason": f"Insufficient data (less than {ma_period} bars)" if not df.empty else "No data returned"})
                             continue
 
-                        df = df.reset_index()
-
-                        if 'Date' in df.columns:
-                            df['Date'] = pd.to_datetime(df['Date']).dt.date
-                        elif 'Datetime' in df.columns:
-                            df['Date'] = pd.to_datetime(df['Datetime']).dt.date
-                            df.drop(columns=['Datetime'], inplace=True, errors='ignore')
+                        df = df.copy()
 
                         # Calculate Moving Average
                         if ma_type_code == "SMA":
                             df['MA'] = df['Close'].rolling(window=int(ma_period)).mean()
                         else:
                             df['MA'] = df['Close'].ewm(span=int(ma_period), adjust=False).mean()
+
 
                         valid_df = df.dropna(subset=['Close', 'MA'])
                         if valid_df.empty:
@@ -584,21 +598,11 @@ else:
                     if selected_chart_sym:
                         with st.spinner(f"Loading chart for {selected_chart_sym}..."):
                             try:
-                                t_obj = yf.Ticker(selected_chart_sym)
-                                chart_data = t_obj.history(
-                                    start=start_date,
-                                    end=end_date + timedelta(days=1),
-                                    interval=selected_interval,
-                                    auto_adjust=False
-                                ).reset_index()
-
-                                if 'Date' in chart_data.columns:
-                                    chart_data['Date'] = pd.to_datetime(chart_data['Date']).dt.date
-                                elif 'Datetime' in chart_data.columns:
-                                    chart_data['Date'] = pd.to_datetime(chart_data['Datetime']).dt.date
+                                chart_data = get_cached_stock_data(selected_chart_sym, start_date, end_date, selected_interval).copy()
 
                                 if p_ma_type == "SMA":
                                     chart_data['MA'] = chart_data['Close'].rolling(window=int(p_ma_period)).mean()
+
                                 else:
                                     chart_data['MA'] = chart_data['Close'].ewm(span=int(p_ma_period), adjust=False).mean()
 
