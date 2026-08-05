@@ -602,32 +602,39 @@ else:
                                 else:
                                     chart_data['MA'] = chart_data['Close'].ewm(span=int(p_ma_period), adjust=False).mean()
 
-                                go = importlib.import_module("plotly.graph_objects")
-                                fig = go.Figure()
-                                fig.add_trace(go.Candlestick(
-                                    x=chart_data['Date'],
-                                    open=chart_data['Open'],
-                                    high=chart_data['High'],
-                                    low=chart_data['Low'],
-                                    close=chart_data['Close'],
-                                    name="OHLC"
-                                ))
-                                fig.add_trace(go.Scatter(
-                                    x=chart_data['Date'],
-                                    y=chart_data['MA'],
-                                    mode='lines',
-                                    name=f"{p_ma_type} {p_ma_period}",
-                                    line=dict(color='orange', width=2)
-                                ))
-                                fig.update_layout(
-                                    title=f"{selected_chart_sym} - Close vs {p_ma_type} {p_ma_period}",
-                                    xaxis_title="Date",
-                                    yaxis_title="Price",
-                                    template="plotly_white",
-                                    xaxis_rangeslider_visible=False,
-                                    height=500
-                                )
-                                st.plotly_chart(fig, width="stretch")
+                                try:
+                                    go = importlib.import_module("plotly.graph_objects")
+                                    fig = go.Figure()
+                                    fig.add_trace(go.Candlestick(
+                                        x=chart_data['Date'],
+                                        open=chart_data['Open'],
+                                        high=chart_data['High'],
+                                        low=chart_data['Low'],
+                                        close=chart_data['Close'],
+                                        name="OHLC"
+                                    ))
+                                    fig.add_trace(go.Scatter(
+                                        x=chart_data['Date'],
+                                        y=chart_data['MA'],
+                                        mode='lines',
+                                        name=f"{p_ma_type} {p_ma_period}",
+                                        line=dict(color='orange', width=2)
+                                    ))
+                                    fig.update_layout(
+                                        title=f"{selected_chart_sym} - Close vs {p_ma_type} {p_ma_period}",
+                                        xaxis_title="Date",
+                                        yaxis_title="Price",
+                                        template="plotly_white",
+                                        xaxis_rangeslider_visible=False,
+                                        height=500
+                                    )
+                                    st.plotly_chart(fig, width="stretch")
+                                except (ImportError, ModuleNotFoundError):
+                                    st.info("💡 `plotly` package is not installed in this Python environment. Displaying native chart. (Run `pip install plotly` for interactive candlestick charts).")
+                                    chart_df = chart_data.set_index('Date')[['Close', 'MA']].copy()
+                                    chart_df.rename(columns={'MA': f"{p_ma_type} {p_ma_period}"}, inplace=True)
+                                    st.line_chart(chart_df)
+
                             except Exception as chart_err:
                                 st.error(f"Error plotting chart for {selected_chart_sym}: {chart_err}")
                 else:
