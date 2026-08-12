@@ -1,6 +1,7 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import io
 import zipfile
 import importlib
@@ -84,7 +85,16 @@ append_ns = st.sidebar.toggle(
 # Screener Settings in Sidebar (when Stock Screener Mode is active)
 if app_mode == "Stock Screener Mode":
     st.sidebar.markdown("---")
-    st.sidebar.header("⚙️ Moving Average Filter")
+    st.sidebar.header("🎯 Filter Combination Mode")
+    filter_logic = st.sidebar.radio(
+        "Combination Logic for Active Filters",
+        options=["AND (Match ALL Active Filters)", "OR (Match ANY Active Filter)"],
+        index=0,
+        help="AND requires all enabled indicators to pass. OR requires at least one enabled indicator to pass."
+    )
+
+    st.sidebar.markdown("---")
+    st.sidebar.header("⚙️ 1. Moving Average Filter")
     ma_condition = st.sidebar.selectbox(
         "MA Filter Condition",
         options=["Close > MA", "Close < MA", "Any / Ignore MA Filter"],
@@ -107,7 +117,7 @@ if app_mode == "Stock Screener Mode":
     )
 
     st.sidebar.markdown("---")
-    st.sidebar.header("📊 RSI Filter Settings")
+    st.sidebar.header("📊 2. RSI Filter Settings")
     rsi_condition = st.sidebar.selectbox(
         "RSI Filter Condition",
         options=[
@@ -147,6 +157,35 @@ if app_mode == "Stock Screener Mode":
             step=1.0,
             help="Standard default oversold threshold is 30"
         )
+
+    st.sidebar.markdown("---")
+    st.sidebar.header("📈 3. Supertrend Filter Settings")
+    st_condition = st.sidebar.selectbox(
+        "Supertrend Filter Condition",
+        options=[
+            "Bullish / Green (Close > Supertrend)",
+            "Bearish / Red (Close < Supertrend)",
+            "Any / Ignore Supertrend Filter"
+        ],
+        index=0,
+        help="Filter stocks based on Supertrend trend signal"
+    )
+    st_period = st.sidebar.number_input(
+        "Supertrend ATR Period",
+        min_value=2,
+        max_value=100,
+        value=10,
+        step=1,
+        help="Default standard ATR period for Supertrend is 10"
+    )
+    st_multiplier = st.sidebar.number_input(
+        "Supertrend Multiplier",
+        min_value=0.5,
+        max_value=10.0,
+        value=3.0,
+        step=0.5,
+        help="Default standard multiplier for Supertrend is 3.0"
+    )
 
     st.sidebar.markdown("---")
     if st.sidebar.button("🧹 Clear Stock Data Cache", help="Clear cached stock price data to force re-downloading fresh data"):
@@ -196,6 +235,69 @@ def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     rsi = rsi.where(avg_loss != 0, 100.0)
     rsi = rsi.where((avg_gain != 0) | (avg_loss != 0), 50.0)
     return rsi
+
+
+def calculate_supertrend(df: pd.DataFrame, period: int = 10, multiplier: float = 3.0) -> pd.DataFrame:
+    """Calculate Supertrend indicator and trend direction (1 = Bullish/Green, -1 = Bearish/Red)."""
+    if len(df) < period:
+        return pd.DataFrame({'Supertrend': [np.nan] * len(df), 'ST_Trend': [0] * len(df)}, index=df.index)
+
+    high = df['High']
+    low = df['Low']
+    close = df['Close']
+
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    atr = tr.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+
+    hl2 = (high + low) / 2.0
+    basic_upper = hl2 + (multiplier * atr)
+    basic_lower = hl2 - (multiplier * atr)
+
+    final_upper = basic_upper.copy()
+    final_lower = basic_lower.copy()
+    supertrend = pd.Series(index=df.index, dtype=float)
+    trend = pd.Series(index=df.index, dtype=int)
+
+    n = len(df)
+    for i in range(1, n):
+        # Upper band
+        if basic_upper.iloc[i] < final_upper.iloc[i-1] or close.iloc[i-1] > final_upper.iloc[i-1]:
+            final_upper.iloc[i] = basic_upper.iloc[i]
+        else:
+            final_upper.iloc[i] = final_upper.iloc[i-1]
+
+        # Lower band
+        if basic_lower.iloc[i] > final_lower.iloc[i-1] or close.iloc[i-1] < final_lower.iloc[i-1]:
+            final_lower.iloc[i] = basic_lower.iloc[i]
+        else:
+            final_lower.iloc[i] = final_lower.iloc[i-1]
+
+        prev_trend = trend.iloc[i-1] if not pd.isna(trend.iloc[i-1]) and trend.iloc[i-1] != 0 else -1
+
+        if prev_trend == 1:
+            if close.iloc[i] < final_lower.iloc[i]:
+                trend.iloc[i] = -1
+                supertrend.iloc[i] = final_upper.iloc[i]
+            else:
+                trend.iloc[i] = 1
+                supertrend.iloc[i] = final_lower.iloc[i]
+        else:
+            if close.iloc[i] > final_upper.iloc[i]:
+                trend.iloc[i] = 1
+                supertrend.iloc[i] = final_lower.iloc[i]
+            else:
+                trend.iloc[i] = -1
+                supertrend.iloc[i] = final_upper.iloc[i]
+
+    if n > 0:
+        supertrend.iloc[0] = final_upper.iloc[0] if not pd.isna(final_upper.iloc[0]) else close.iloc[0]
+        trend.iloc[0] = -1
+
+    return pd.DataFrame({'Supertrend': supertrend, 'ST_Trend': trend}, index=df.index)
 
 # Validation helper for dates
 
@@ -479,10 +581,10 @@ elif app_mode == "Batch CSV Upload Mode":
 # MODE 3: STOCK SCREENER MODE
 # ==============================================================================
 else:
-    st.subheader("🔍 Stock Screener - Moving Average & RSI Filter")
+    st.subheader("🔍 Stock Screener - Multi-Indicator (MA, RSI, Supertrend)")
     st.write(
-        "Upload a CSV file containing a list of stock symbols. Set your Moving Average and RSI parameters in the sidebar. "
-        "The app will calculate price indicators and filter stocks based on your selected criteria (e.g. Overbought / Oversold RSI)."
+        "Upload a CSV file containing a list of stock symbols. Configure Moving Average, RSI, and Supertrend parameters in the sidebar. "
+        "Filter stocks independently or combine active filters using **AND** (match all) / **OR** (match any) logic."
     )
 
     uploaded_file = st.file_uploader(
@@ -533,13 +635,13 @@ else:
             with col_scr2:
                 st.write("")
                 st.write("")
-                run_screener_btn = st.button("🚀 Run Stock Screener", type="primary", width="stretch")
+                run_screener_btn = st.button("🚀 Run Multi-Indicator Screener", type="primary", width="stretch")
 
             symbols_to_process = formatted_symbols[:max_symbols]
             ma_type_code = "SMA" if "SMA" in ma_type else "EMA"
 
             if run_screener_btn:
-                st.subheader(f"⏳ Screening {len(symbols_to_process)} stocks with MA ({ma_type_code} {ma_period}) & RSI ({rsi_period}) filters...")
+                st.subheader(f"⏳ Screening {len(symbols_to_process)} stocks (Logic: {'ALL' if 'AND' in filter_logic else 'ANY'} active filters)...")
 
                 progress_bar = st.progress(0)
                 status_text = st.empty()
@@ -549,7 +651,7 @@ else:
                 error_stocks = []
 
                 total = len(symbols_to_process)
-                min_bars_needed = max(int(ma_period), int(rsi_period)) + 1
+                min_bars_needed = max(int(ma_period), int(rsi_period), int(st_period)) + 2
 
                 for idx, sym in enumerate(symbols_to_process):
                     status_text.text(f"[{idx+1}/{total}] Processing symbol: {sym}...")
@@ -573,7 +675,12 @@ else:
                         # Calculate RSI
                         df['RSI'] = calculate_rsi(df['Close'], period=int(rsi_period))
 
-                        valid_df = df.dropna(subset=['Close', 'MA', 'RSI'])
+                        # Calculate Supertrend
+                        st_df = calculate_supertrend(df, period=int(st_period), multiplier=float(st_multiplier))
+                        df['Supertrend'] = st_df['Supertrend']
+                        df['ST_Trend'] = st_df['ST_Trend']
+
+                        valid_df = df.dropna(subset=['Close', 'MA', 'RSI', 'Supertrend'])
                         if valid_df.empty:
                             error_stocks.append({"Symbol": sym, "Reason": "Unable to compute indicators"})
                             continue
@@ -582,12 +689,14 @@ else:
                         latest_close = float(latest_row['Close'])
                         latest_ma = float(latest_row['MA'])
                         latest_rsi = float(latest_row['RSI'])
+                        latest_st = float(latest_row['Supertrend'])
+                        latest_st_trend = int(latest_row['ST_Trend'])
                         latest_date = latest_row['Date']
 
                         diff = latest_close - latest_ma
                         pct_above = (diff / latest_ma) * 100 if latest_ma != 0 else 0.0
 
-                        # RSI Status determination
+                        # Indicator Status determinations
                         if latest_rsi >= rsi_overbought:
                             rsi_status = "🔴 Overbought"
                         elif latest_rsi <= rsi_oversold:
@@ -595,25 +704,43 @@ else:
                         else:
                             rsi_status = "⚪ Normal"
 
-                        # MA Filter check
-                        if ma_condition == "Close > MA":
-                            ma_passed = latest_close > latest_ma
-                        elif ma_condition == "Close < MA":
-                            ma_passed = latest_close < latest_ma
-                        else:  # Any / Ignore MA Filter
-                            ma_passed = True
+                        if latest_st_trend == 1:
+                            st_status = "🟢 Bullish / Green"
+                        else:
+                            st_status = "🔴 Bearish / Red"
 
-                        # RSI Filter check
+                        # Active evaluations collection
+                        active_evaluations = []
+
+                        # 1. MA Evaluation
+                        if ma_condition == "Close > MA":
+                            active_evaluations.append(latest_close > latest_ma)
+                        elif ma_condition == "Close < MA":
+                            active_evaluations.append(latest_close < latest_ma)
+
+                        # 2. RSI Evaluation
                         if rsi_condition == "Overbought or Oversold (RSI >= High or RSI <= Low)":
-                            rsi_passed = (latest_rsi >= rsi_overbought) or (latest_rsi <= rsi_oversold)
+                            active_evaluations.append((latest_rsi >= rsi_overbought) or (latest_rsi <= rsi_oversold))
                         elif rsi_condition == "Overbought Only (RSI >= High Threshold)":
-                            rsi_passed = (latest_rsi >= rsi_overbought)
+                            active_evaluations.append(latest_rsi >= rsi_overbought)
                         elif rsi_condition == "Oversold Only (RSI <= Low Threshold)":
-                            rsi_passed = (latest_rsi <= rsi_oversold)
+                            active_evaluations.append(latest_rsi <= rsi_oversold)
                         elif rsi_condition == "Normal Range Only (Low < RSI < High)":
-                            rsi_passed = (rsi_oversold < latest_rsi < rsi_overbought)
-                        else:  # Any / Ignore RSI Filter
-                            rsi_passed = True
+                            active_evaluations.append(rsi_oversold < latest_rsi < rsi_overbought)
+
+                        # 3. Supertrend Evaluation
+                        if st_condition == "Bullish / Green (Close > Supertrend)":
+                            active_evaluations.append(latest_st_trend == 1)
+                        elif st_condition == "Bearish / Red (Close < Supertrend)":
+                            active_evaluations.append(latest_st_trend == -1)
+
+                        # Filter combination logic
+                        if not active_evaluations:
+                            passed = True
+                        elif "AND" in filter_logic:
+                            passed = all(active_evaluations)
+                        else:
+                            passed = any(active_evaluations)
 
                         record = {
                             "Symbol": sym,
@@ -622,11 +749,13 @@ else:
                             f"MA ({ma_type_code} {ma_period})": round(latest_ma, 2),
                             f"RSI ({rsi_period})": round(latest_rsi, 2),
                             "RSI Status": rsi_status,
+                            f"Supertrend ({st_period}, {st_multiplier})": round(latest_st, 2),
+                            "Supertrend Signal": st_status,
                             "Diff Above MA": round(diff, 2),
                             "% Above MA": round(pct_above, 2)
                         }
 
-                        if ma_passed and rsi_passed:
+                        if passed:
                             passed_stocks.append(record)
                         else:
                             failed_stocks.append(record)
@@ -647,8 +776,12 @@ else:
                     'rsi_period': rsi_period,
                     'rsi_overbought': rsi_overbought,
                     'rsi_oversold': rsi_oversold,
+                    'st_period': st_period,
+                    'st_multiplier': st_multiplier,
                     'ma_condition': ma_condition,
-                    'rsi_condition': rsi_condition
+                    'rsi_condition': rsi_condition,
+                    'st_condition': st_condition,
+                    'filter_logic': filter_logic
                 }
 
             # Display Screened Results if available in session state
@@ -662,9 +795,12 @@ else:
                 p_rsi_period = res.get('rsi_period', 14)
                 p_rsi_overbought = res.get('rsi_overbought', 70.0)
                 p_rsi_oversold = res.get('rsi_oversold', 30.0)
+                p_st_period = res.get('st_period', 10)
+                p_st_multiplier = res.get('st_multiplier', 3.0)
+                p_filter_logic = res.get('filter_logic', 'AND')
 
                 st.markdown("---")
-                st.subheader(f"📊 Screener Output Summary")
+                st.subheader(f"📊 Screener Output Summary (Logic: {'ALL' if 'AND' in p_filter_logic else 'ANY'})")
 
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Total Screened", f"{len(passed) + len(failed) + len(errors)}")
@@ -673,7 +809,7 @@ else:
                 m4.metric("Errors / Missing Data", f"{len(errors)}")
 
                 if passed:
-                    st.success(f"✅ Found **{len(passed)} stocks** matching your filter criteria!")
+                    st.success(f"✅ Found **{len(passed)} stocks** matching your active filter criteria!")
 
                     passed_df = pd.DataFrame(passed)
                     # Sort options
@@ -681,11 +817,11 @@ else:
                     with col_sort1:
                         sort_by_col = st.selectbox(
                             "Sort Results By:",
-                            options=[f"RSI ({p_rsi_period})", "% Above MA", "Latest Close", "Symbol"],
+                            options=["Symbol", f"RSI ({p_rsi_period})", "% Above MA", "Latest Close"],
                             index=0
                         )
 
-                    ascending = False if sort_by_col != "Symbol" else True
+                    ascending = True if sort_by_col == "Symbol" else False
                     passed_df = passed_df.sort_values(by=sort_by_col, ascending=ascending)
 
                     st.write(f"### 📋 Filtered Stocks Table ({len(passed_df)} stocks)")
@@ -705,9 +841,9 @@ else:
 
                     # Interactive Chart Visualizer for Screened Stocks
                     st.markdown("---")
-                    st.subheader("📉 Visualizer with Price, MA & RSI Indicators")
+                    st.subheader("📉 Visualizer with Price, MA, Supertrend & RSI")
                     selected_chart_sym = st.selectbox(
-                        "Select a passed stock to view interactive price & RSI chart:",
+                        "Select a passed stock to view interactive multi-indicator chart:",
                         options=passed_df["Symbol"].tolist()
                     )
 
@@ -723,6 +859,12 @@ else:
 
                                 chart_data['RSI'] = calculate_rsi(chart_data['Close'], period=int(p_rsi_period))
 
+                                st_chart = calculate_supertrend(chart_data, period=int(p_st_period), multiplier=float(p_st_multiplier))
+                                chart_data['Supertrend'] = st_chart['Supertrend']
+                                chart_data['ST_Trend'] = st_chart['ST_Trend']
+                                chart_data['ST_Bull'] = chart_data['Supertrend'].where(chart_data['ST_Trend'] == 1, np.nan)
+                                chart_data['ST_Bear'] = chart_data['Supertrend'].where(chart_data['ST_Trend'] == -1, np.nan)
+
                                 try:
                                     go = importlib.import_module("plotly.graph_objects")
                                     make_subplots = importlib.import_module("plotly.subplots").make_subplots
@@ -732,7 +874,10 @@ else:
                                         shared_xaxes=True,
                                         row_heights=[0.7, 0.3],
                                         vertical_spacing=0.06,
-                                        subplot_titles=(f"{selected_chart_sym} Price & {p_ma_type} ({p_ma_period})", f"RSI ({p_rsi_period}) Indicator")
+                                        subplot_titles=(
+                                            f"{selected_chart_sym} Price, {p_ma_type} ({p_ma_period}) & Supertrend ({p_st_period}, {p_st_multiplier})",
+                                            f"RSI ({p_rsi_period}) Indicator"
+                                        )
                                     )
 
                                     # Candlestick chart
@@ -754,6 +899,24 @@ else:
                                         line=dict(color='orange', width=2)
                                     ), row=1, col=1)
 
+                                    # Supertrend Bullish Line
+                                    fig.add_trace(go.Scatter(
+                                        x=chart_data['Date'],
+                                        y=chart_data['ST_Bull'],
+                                        mode='lines',
+                                        name="Supertrend (Bullish)",
+                                        line=dict(color='green', width=2)
+                                    ), row=1, col=1)
+
+                                    # Supertrend Bearish Line
+                                    fig.add_trace(go.Scatter(
+                                        x=chart_data['Date'],
+                                        y=chart_data['ST_Bear'],
+                                        mode='lines',
+                                        name="Supertrend (Bearish)",
+                                        line=dict(color='red', width=2)
+                                    ), row=1, col=1)
+
                                     # RSI Line
                                     fig.add_trace(go.Scatter(
                                         x=chart_data['Date'],
@@ -770,7 +933,7 @@ else:
                                     fig.update_layout(
                                         template="plotly_white",
                                         xaxis_rangeslider_visible=False,
-                                        height=650,
+                                        height=700,
                                         margin=dict(l=40, r=40, t=60, b=40)
                                     )
                                     fig.update_yaxes(title_text="Price", row=1, col=1)
@@ -779,8 +942,8 @@ else:
                                     st.plotly_chart(fig, width="stretch")
 
                                 except (ImportError, ModuleNotFoundError, AttributeError):
-                                    st.info("💡 Displaying native Streamlit charts for Price & RSI.")
-                                    chart_df = chart_data.set_index('Date')[['Close', 'MA']].copy()
+                                    st.info("💡 Displaying native Streamlit charts for Price, Supertrend & RSI.")
+                                    chart_df = chart_data.set_index('Date')[['Close', 'MA', 'Supertrend']].copy()
                                     chart_df.rename(columns={'MA': f"{p_ma_type} {p_ma_period}"}, inplace=True)
                                     st.line_chart(chart_df)
 
