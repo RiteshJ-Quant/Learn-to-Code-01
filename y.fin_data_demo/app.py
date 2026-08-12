@@ -81,10 +81,16 @@ append_ns = st.sidebar.toggle(
     help="Appends .NS to stock symbols for National Stock Exchange (NSE) India stocks (e.g. RELIANCE -> RELIANCE.NS)"
 )
 
-# Screener MA Settings in Sidebar (when Stock Screener Mode is active)
+# Screener Settings in Sidebar (when Stock Screener Mode is active)
 if app_mode == "Stock Screener Mode":
     st.sidebar.markdown("---")
-    st.sidebar.header("⚙️ Moving Average Settings")
+    st.sidebar.header("⚙️ Moving Average Filter")
+    ma_condition = st.sidebar.selectbox(
+        "MA Filter Condition",
+        options=["Close > MA", "Close < MA", "Any / Ignore MA Filter"],
+        index=0,
+        help="Filter stocks based on Close price relative to Moving Average"
+    )
     ma_type = st.sidebar.selectbox(
         "Moving Average Type",
         options=["SMA (Simple Moving Average)", "EMA (Exponential Moving Average)"],
@@ -99,6 +105,50 @@ if app_mode == "Stock Screener Mode":
         step=1,
         help="Number of data points used to compute moving average (e.g., 20, 50, 200)"
     )
+
+    st.sidebar.markdown("---")
+    st.sidebar.header("📊 RSI Filter Settings")
+    rsi_condition = st.sidebar.selectbox(
+        "RSI Filter Condition",
+        options=[
+            "Overbought or Oversold (RSI >= High or RSI <= Low)",
+            "Overbought Only (RSI >= High Threshold)",
+            "Oversold Only (RSI <= Low Threshold)",
+            "Normal Range Only (Low < RSI < High)",
+            "Any / Ignore RSI Filter"
+        ],
+        index=0,
+        help="Filter stocks by RSI overbought/oversold status"
+    )
+    rsi_period = st.sidebar.number_input(
+        "RSI Period (Bars/Days)",
+        min_value=2,
+        max_value=100,
+        value=14,
+        step=1,
+        help="Default standard RSI period is 14"
+    )
+    col_rsi1, col_rsi2 = st.sidebar.columns(2)
+    with col_rsi1:
+        rsi_overbought = st.number_input(
+            "Overbought (≥)",
+            min_value=50.0,
+            max_value=100.0,
+            value=70.0,
+            step=1.0,
+            help="Standard default overbought threshold is 70"
+        )
+    with col_rsi2:
+        rsi_oversold = st.number_input(
+            "Oversold (≤)",
+            min_value=0.0,
+            max_value=50.0,
+            value=30.0,
+            step=1.0,
+            help="Standard default oversold threshold is 30"
+        )
+
+    st.sidebar.markdown("---")
     if st.sidebar.button("🧹 Clear Stock Data Cache", help="Clear cached stock price data to force re-downloading fresh data"):
         st.cache_data.clear()
         st.sidebar.success("Cache cleared!")
@@ -130,6 +180,22 @@ def get_cached_stock_data(symbol: str, start: datetime, end: datetime, interval:
         df['Date'] = pd.to_datetime(df['Datetime']).dt.date
         df.drop(columns=['Datetime'], inplace=True, errors='ignore')
     return df
+
+
+def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    """Calculate Relative Strength Index (RSI) using Wilder's Smoothing."""
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+
+    rs = avg_gain / avg_loss
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    rsi = rsi.where(avg_loss != 0, 100.0)
+    rsi = rsi.where((avg_gain != 0) | (avg_loss != 0), 50.0)
+    return rsi
 
 # Validation helper for dates
 
@@ -413,10 +479,10 @@ elif app_mode == "Batch CSV Upload Mode":
 # MODE 3: STOCK SCREENER MODE
 # ==============================================================================
 else:
-    st.subheader("🔍 Stock Screener - Moving Average Filter")
+    st.subheader("🔍 Stock Screener - Moving Average & RSI Filter")
     st.write(
-        "Upload a CSV file containing a list of stock symbols. Set your Moving Average parameters (SMA/EMA & period). "
-        "The app will fetch price history and output all stocks whose latest close price is **above** their Moving Average."
+        "Upload a CSV file containing a list of stock symbols. Set your Moving Average and RSI parameters in the sidebar. "
+        "The app will calculate price indicators and filter stocks based on your selected criteria (e.g. Overbought / Oversold RSI)."
     )
 
     uploaded_file = st.file_uploader(
@@ -467,14 +533,13 @@ else:
             with col_scr2:
                 st.write("")
                 st.write("")
-                run_screener_btn = st.button("🚀 Run Moving Average Screener", type="primary", width="stretch")
+                run_screener_btn = st.button("🚀 Run Stock Screener", type="primary", width="stretch")
 
             symbols_to_process = formatted_symbols[:max_symbols]
             ma_type_code = "SMA" if "SMA" in ma_type else "EMA"
 
-
             if run_screener_btn:
-                st.subheader(f"⏳ Screening {len(symbols_to_process)} stocks for Close > {ma_period} {ma_type_code}...")
+                st.subheader(f"⏳ Screening {len(symbols_to_process)} stocks with MA ({ma_type_code} {ma_period}) & RSI ({rsi_period}) filters...")
 
                 progress_bar = st.progress(0)
                 status_text = st.empty()
@@ -484,6 +549,7 @@ else:
                 error_stocks = []
 
                 total = len(symbols_to_process)
+                min_bars_needed = max(int(ma_period), int(rsi_period)) + 1
 
                 for idx, sym in enumerate(symbols_to_process):
                     status_text.text(f"[{idx+1}/{total}] Processing symbol: {sym}...")
@@ -492,8 +558,8 @@ else:
                     try:
                         df = get_cached_stock_data(sym, start_date, end_date, selected_interval)
 
-                        if df.empty or len(df) < ma_period:
-                            error_stocks.append({"Symbol": sym, "Reason": f"Insufficient data (less than {ma_period} bars)" if not df.empty else "No data returned"})
+                        if df.empty or len(df) < min_bars_needed:
+                            error_stocks.append({"Symbol": sym, "Reason": f"Insufficient data (less than {min_bars_needed} bars)" if not df.empty else "No data returned"})
                             continue
 
                         df = df.copy()
@@ -504,30 +570,63 @@ else:
                         else:
                             df['MA'] = df['Close'].ewm(span=int(ma_period), adjust=False).mean()
 
+                        # Calculate RSI
+                        df['RSI'] = calculate_rsi(df['Close'], period=int(rsi_period))
 
-                        valid_df = df.dropna(subset=['Close', 'MA'])
+                        valid_df = df.dropna(subset=['Close', 'MA', 'RSI'])
                         if valid_df.empty:
-                            error_stocks.append({"Symbol": sym, "Reason": "Unable to compute Moving Average"})
+                            error_stocks.append({"Symbol": sym, "Reason": "Unable to compute indicators"})
                             continue
 
                         latest_row = valid_df.iloc[-1]
                         latest_close = float(latest_row['Close'])
                         latest_ma = float(latest_row['MA'])
+                        latest_rsi = float(latest_row['RSI'])
                         latest_date = latest_row['Date']
 
                         diff = latest_close - latest_ma
                         pct_above = (diff / latest_ma) * 100 if latest_ma != 0 else 0.0
+
+                        # RSI Status determination
+                        if latest_rsi >= rsi_overbought:
+                            rsi_status = "🔴 Overbought"
+                        elif latest_rsi <= rsi_oversold:
+                            rsi_status = "🟢 Oversold"
+                        else:
+                            rsi_status = "⚪ Normal"
+
+                        # MA Filter check
+                        if ma_condition == "Close > MA":
+                            ma_passed = latest_close > latest_ma
+                        elif ma_condition == "Close < MA":
+                            ma_passed = latest_close < latest_ma
+                        else:  # Any / Ignore MA Filter
+                            ma_passed = True
+
+                        # RSI Filter check
+                        if rsi_condition == "Overbought or Oversold (RSI >= High or RSI <= Low)":
+                            rsi_passed = (latest_rsi >= rsi_overbought) or (latest_rsi <= rsi_oversold)
+                        elif rsi_condition == "Overbought Only (RSI >= High Threshold)":
+                            rsi_passed = (latest_rsi >= rsi_overbought)
+                        elif rsi_condition == "Oversold Only (RSI <= Low Threshold)":
+                            rsi_passed = (latest_rsi <= rsi_oversold)
+                        elif rsi_condition == "Normal Range Only (Low < RSI < High)":
+                            rsi_passed = (rsi_oversold < latest_rsi < rsi_overbought)
+                        else:  # Any / Ignore RSI Filter
+                            rsi_passed = True
 
                         record = {
                             "Symbol": sym,
                             "Latest Date": latest_date,
                             "Latest Close": round(latest_close, 2),
                             f"MA ({ma_type_code} {ma_period})": round(latest_ma, 2),
+                            f"RSI ({rsi_period})": round(latest_rsi, 2),
+                            "RSI Status": rsi_status,
                             "Diff Above MA": round(diff, 2),
                             "% Above MA": round(pct_above, 2)
                         }
 
-                        if latest_close > latest_ma:
+                        if ma_passed and rsi_passed:
                             passed_stocks.append(record)
                         else:
                             failed_stocks.append(record)
@@ -544,7 +643,12 @@ else:
                     'failed': failed_stocks,
                     'errors': error_stocks,
                     'ma_type': ma_type_code,
-                    'ma_period': ma_period
+                    'ma_period': ma_period,
+                    'rsi_period': rsi_period,
+                    'rsi_overbought': rsi_overbought,
+                    'rsi_oversold': rsi_oversold,
+                    'ma_condition': ma_condition,
+                    'rsi_condition': rsi_condition
                 }
 
             # Display Screened Results if available in session state
@@ -555,24 +659,36 @@ else:
                 errors = res['errors']
                 p_ma_type = res['ma_type']
                 p_ma_period = res['ma_period']
+                p_rsi_period = res.get('rsi_period', 14)
+                p_rsi_overbought = res.get('rsi_overbought', 70.0)
+                p_rsi_oversold = res.get('rsi_oversold', 30.0)
 
                 st.markdown("---")
-                st.subheader(f"📊 Screener Output Summary (Close > {p_ma_period} {p_ma_type})")
+                st.subheader(f"📊 Screener Output Summary")
 
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Total Screened", f"{len(passed) + len(failed) + len(errors)}")
-                m2.metric("Stocks Above MA (Passed)", f"{len(passed)}", delta=f"{len(passed)} stocks", delta_color="normal")
-                m3.metric("Stocks Below MA (Failed)", f"{len(failed)}")
+                m2.metric("Stocks Passed Filter", f"{len(passed)}", delta=f"{len(passed)} stocks", delta_color="normal")
+                m3.metric("Stocks Did Not Match", f"{len(failed)}")
                 m4.metric("Errors / Missing Data", f"{len(errors)}")
 
                 if passed:
-                    st.success(f"✅ Found **{len(passed)} stocks** trading **ABOVE** the {p_ma_period} {p_ma_type}!")
-                    
-                    passed_df = pd.DataFrame(passed)
-                    # Sort by % Above MA descending
-                    passed_df = passed_df.sort_values(by="% Above MA", ascending=False)
+                    st.success(f"✅ Found **{len(passed)} stocks** matching your filter criteria!")
 
-                    st.write(f"### 📋 Stocks Above Moving Average ({len(passed_df)} stocks)")
+                    passed_df = pd.DataFrame(passed)
+                    # Sort options
+                    col_sort1, col_sort2 = st.columns([1, 2])
+                    with col_sort1:
+                        sort_by_col = st.selectbox(
+                            "Sort Results By:",
+                            options=[f"RSI ({p_rsi_period})", "% Above MA", "Latest Close", "Symbol"],
+                            index=0
+                        )
+
+                    ascending = False if sort_by_col != "Symbol" else True
+                    passed_df = passed_df.sort_values(by=sort_by_col, ascending=ascending)
+
+                    st.write(f"### 📋 Filtered Stocks Table ({len(passed_df)} stocks)")
                     st.dataframe(passed_df, width="stretch")
 
                     col_dl, _ = st.columns([1, 1])
@@ -581,7 +697,7 @@ else:
                         st.download_button(
                             label=f"💾 Download Screened Stocks CSV ({len(passed)} stocks)",
                             data=csv_data,
-                            file_name=f"screener_above_{p_ma_type}{p_ma_period}_{datetime.today().strftime('%Y%m%d')}.csv",
+                            file_name=f"screener_results_{datetime.today().strftime('%Y%m%d')}.csv",
                             mime="text/csv",
                             type="primary",
                             width="stretch"
@@ -589,9 +705,9 @@ else:
 
                     # Interactive Chart Visualizer for Screened Stocks
                     st.markdown("---")
-                    st.subheader("📉 Visualizer for Screened Stocks")
+                    st.subheader("📉 Visualizer with Price, MA & RSI Indicators")
                     selected_chart_sym = st.selectbox(
-                        "Select a passed stock to view price chart & Moving Average line:",
+                        "Select a passed stock to view interactive price & RSI chart:",
                         options=passed_df["Symbol"].tolist()
                     )
 
@@ -602,13 +718,24 @@ else:
 
                                 if p_ma_type == "SMA":
                                     chart_data['MA'] = chart_data['Close'].rolling(window=int(p_ma_period)).mean()
-
                                 else:
                                     chart_data['MA'] = chart_data['Close'].ewm(span=int(p_ma_period), adjust=False).mean()
 
+                                chart_data['RSI'] = calculate_rsi(chart_data['Close'], period=int(p_rsi_period))
+
                                 try:
                                     go = importlib.import_module("plotly.graph_objects")
-                                    fig = go.Figure()
+                                    make_subplots = importlib.import_module("plotly.subplots").make_subplots
+
+                                    fig = make_subplots(
+                                        rows=2, cols=1,
+                                        shared_xaxes=True,
+                                        row_heights=[0.7, 0.3],
+                                        vertical_spacing=0.06,
+                                        subplot_titles=(f"{selected_chart_sym} Price & {p_ma_type} ({p_ma_period})", f"RSI ({p_rsi_period}) Indicator")
+                                    )
+
+                                    # Candlestick chart
                                     fig.add_trace(go.Candlestick(
                                         x=chart_data['Date'],
                                         open=chart_data['Open'],
@@ -616,33 +743,54 @@ else:
                                         low=chart_data['Low'],
                                         close=chart_data['Close'],
                                         name="OHLC"
-                                    ))
+                                    ), row=1, col=1)
+
+                                    # MA Line
                                     fig.add_trace(go.Scatter(
                                         x=chart_data['Date'],
                                         y=chart_data['MA'],
                                         mode='lines',
                                         name=f"{p_ma_type} {p_ma_period}",
                                         line=dict(color='orange', width=2)
-                                    ))
+                                    ), row=1, col=1)
+
+                                    # RSI Line
+                                    fig.add_trace(go.Scatter(
+                                        x=chart_data['Date'],
+                                        y=chart_data['RSI'],
+                                        mode='lines',
+                                        name=f"RSI {p_rsi_period}",
+                                        line=dict(color='purple', width=2)
+                                    ), row=2, col=1)
+
+                                    # RSI Threshold Lines
+                                    fig.add_hline(y=p_rsi_overbought, line_dash="dash", line_color="red", annotation_text="Overbought", row=2, col=1)
+                                    fig.add_hline(y=p_rsi_oversold, line_dash="dash", line_color="green", annotation_text="Oversold", row=2, col=1)
+
                                     fig.update_layout(
-                                        title=f"{selected_chart_sym} - Close vs {p_ma_type} {p_ma_period}",
-                                        xaxis_title="Date",
-                                        yaxis_title="Price",
                                         template="plotly_white",
                                         xaxis_rangeslider_visible=False,
-                                        height=500
+                                        height=650,
+                                        margin=dict(l=40, r=40, t=60, b=40)
                                     )
+                                    fig.update_yaxes(title_text="Price", row=1, col=1)
+                                    fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1)
+
                                     st.plotly_chart(fig, width="stretch")
-                                except (ImportError, ModuleNotFoundError):
-                                    st.info("💡 `plotly` package is not installed in this Python environment. Displaying native chart. (Run `pip install plotly` for interactive candlestick charts).")
+
+                                except (ImportError, ModuleNotFoundError, AttributeError):
+                                    st.info("💡 Displaying native Streamlit charts for Price & RSI.")
                                     chart_df = chart_data.set_index('Date')[['Close', 'MA']].copy()
                                     chart_df.rename(columns={'MA': f"{p_ma_type} {p_ma_period}"}, inplace=True)
                                     st.line_chart(chart_df)
 
+                                    rsi_chart_df = chart_data.set_index('Date')[['RSI']].copy()
+                                    st.line_chart(rsi_chart_df)
+
                             except Exception as chart_err:
                                 st.error(f"Error plotting chart for {selected_chart_sym}: {chart_err}")
                 else:
-                    st.warning(f"No stocks found trading above the {p_ma_period} {p_ma_type}.")
+                    st.warning("No stocks found matching the selected filter criteria.")
 
                 if errors:
                     with st.expander("See Skipped / Error Symbols"):
@@ -650,4 +798,3 @@ else:
 
         except Exception as e:
             st.error(f"Error reading CSV file: {e}")
-
