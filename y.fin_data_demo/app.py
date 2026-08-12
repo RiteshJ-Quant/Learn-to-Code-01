@@ -251,7 +251,8 @@ def calculate_supertrend(df: pd.DataFrame, period: int = 10, multiplier: float =
     tr3 = (low - close.shift(1)).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
-    atr = tr.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    # Use min_periods=1 so ATR has no initial NaNs
+    atr = tr.ewm(alpha=1/period, min_periods=1, adjust=False).mean()
 
     hl2 = (high + low) / 2.0
     basic_upper = hl2 + (multiplier * atr)
@@ -259,11 +260,15 @@ def calculate_supertrend(df: pd.DataFrame, period: int = 10, multiplier: float =
 
     final_upper = basic_upper.copy()
     final_lower = basic_lower.copy()
-    supertrend = pd.Series(index=df.index, dtype=float)
-    trend = pd.Series(index=df.index, dtype=int)
 
-    n = len(df)
-    for i in range(1, n):
+    supertrend = np.zeros(len(df))
+    trend = np.zeros(len(df), dtype=int)
+
+    # Initialize first bar
+    trend[0] = 1 if close.iloc[0] > final_upper.iloc[0] else -1
+    supertrend[0] = final_lower.iloc[0] if trend[0] == 1 else final_upper.iloc[0]
+
+    for i in range(1, len(df)):
         # Upper band
         if basic_upper.iloc[i] < final_upper.iloc[i-1] or close.iloc[i-1] > final_upper.iloc[i-1]:
             final_upper.iloc[i] = basic_upper.iloc[i]
@@ -276,26 +281,21 @@ def calculate_supertrend(df: pd.DataFrame, period: int = 10, multiplier: float =
         else:
             final_lower.iloc[i] = final_lower.iloc[i-1]
 
-        prev_trend = trend.iloc[i-1] if not pd.isna(trend.iloc[i-1]) and trend.iloc[i-1] != 0 else -1
-
-        if prev_trend == 1:
+        # Trend & Supertrend line
+        if trend[i-1] == 1:
             if close.iloc[i] < final_lower.iloc[i]:
-                trend.iloc[i] = -1
-                supertrend.iloc[i] = final_upper.iloc[i]
+                trend[i] = -1
+                supertrend[i] = final_upper.iloc[i]
             else:
-                trend.iloc[i] = 1
-                supertrend.iloc[i] = final_lower.iloc[i]
+                trend[i] = 1
+                supertrend[i] = final_lower.iloc[i]
         else:
             if close.iloc[i] > final_upper.iloc[i]:
-                trend.iloc[i] = 1
-                supertrend.iloc[i] = final_lower.iloc[i]
+                trend[i] = 1
+                supertrend[i] = final_lower.iloc[i]
             else:
-                trend.iloc[i] = -1
-                supertrend.iloc[i] = final_upper.iloc[i]
-
-    if n > 0:
-        supertrend.iloc[0] = final_upper.iloc[0] if not pd.isna(final_upper.iloc[0]) else close.iloc[0]
-        trend.iloc[0] = -1
+                trend[i] = -1
+                supertrend[i] = final_upper.iloc[i]
 
     return pd.DataFrame({'Supertrend': supertrend, 'ST_Trend': trend}, index=df.index)
 
